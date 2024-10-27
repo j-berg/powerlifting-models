@@ -221,7 +221,7 @@ def predict_future_1rm(ax, data, lift_type, color, goal_weight):
     residuals = y - y_pred
 
     # Assign weights - more weight to points where residual is positive (i.e., y > y_pred)
-    weights = np.where(residuals > 0, 5.0, 1.0)  # Give higher weight to points above the line
+    weights = np.where(residuals > 0, 5.0, 0.5)  # Give higher weight to points above the line
 
     # Perform weighted linear regression
     model_weighted = LinearRegression()
