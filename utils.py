@@ -258,47 +258,156 @@ def predict_future_1rm(ax, data, lift_type, color, goal_weight):
     y_offset = 1.2
     ax.set_ylim(0, goal_weight * y_offset)
 
+    
 def plot_body_composition(body_comp):
-    fig, ax = plt.subplots(figsize=(5, 4))
-    metrics = ['Weight (lb)', 'Lean Body Mass (lb)', 'Body Fat Mass (lb)', 'PBF (%)']
-
-    for metric in metrics:
-        data = body_comp[metric].dropna()
-        if data.empty:
+    from sklearn.preprocessing import PolynomialFeatures
+    from sklearn.linear_model import LinearRegression
+    from sklearn.pipeline import make_pipeline
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    # Update metrics list - now with body fat as percentage
+    metrics = [
+        ('Weight (lb)', 'Weight'), 
+        ('SMM (lb)', 'SMM'), 
+        ('PBF / Body Fat (%)', 'Body Fat')
+    ]
+    axes = [ax] + [ax.twinx() for _ in range(len(metrics)-1)]
+    
+    # Offset each additional y-axis
+    axis_offset = 60  # points
+    for i, axis in enumerate(axes[1:], 1):
+        axis.spines['right'].set_position(('outward', i * axis_offset))
+    
+    for (metric, metric_label), axis, color in zip(metrics, axes, ['#1f77b4', '#ff7f0e', '#2ca02c']):
+        metric_data = pd.DataFrame({
+            'value': pd.to_numeric(body_comp[metric], errors='coerce'),
+            'equipment': body_comp['Equipment']
+        })
+        
+        # Drop rows where the metric value is NaN
+        metric_data = metric_data.dropna(subset=['value'])
+        
+        if metric_data.empty:
             continue
-
-        # Plot line and markers
-        line = ax.plot(data.index, data, '-o', label=metric, markeredgecolor='black', markersize=5)[0]
-        color = line.get_color()
+            
+        # Center the data around the middle of a reasonable range
+        mid_point = (metric_data['value'].max() + metric_data['value'].min()) / 2
+        range_size = (metric_data['value'].max() - metric_data['value'].min()) * 1.5
+        y_min = mid_point - range_size/2
+        y_max = mid_point + range_size/2
+        
+        # Convert dates to numerical values for trend line fitting
+        x_num = (metric_data.index - metric_data.index[0]).days
+        
+        # Plot scattered points with different markers based on equipment
+        for eq_type in metric_data['equipment'].unique():
+            mask = metric_data['equipment'] == eq_type
+            marker = 's' if 'Inbody 270' in str(eq_type) else 'o'
+            data_subset = metric_data[mask]
+            
+            axis.scatter(data_subset.index, data_subset['value'], color=color,
+                        marker=marker, edgecolor='black', s=30,
+                        label=f'{metric} ({eq_type})')
+            
+        try:
+            # Fit polynomial regression
+            poly_model = make_pipeline(
+                PolynomialFeatures(degree=3),
+                LinearRegression()
+            )
+            
+            # Reshape data for sklearn
+            X = np.array(x_num).reshape(-1, 1)
+            y = np.array(metric_data['value']).reshape(-1, 1)
+            
+            # Fit the model
+            poly_model.fit(X, y)
+            
+            # Generate points for smooth curve
+            x_smooth = np.linspace(min(x_num), max(x_num), 200).reshape(-1, 1)
+            y_smooth = poly_model.predict(x_smooth)
+            
+            # Convert x_smooth back to dates
+            dates_smooth = metric_data.index[0] + pd.to_timedelta(x_smooth.ravel(), unit='D')
+            
+            # Plot the trend line
+            if metric == 'Weight (lb)':
+                axis.plot(dates_smooth, y_smooth, '-', color=color, alpha=0.8,
+                     label=f'{metric} (trend)')
+            else:
+                axis.plot(dates_smooth, y_smooth, '--', color=color, alpha=0.8,
+                     label=f'{metric} (trend)')
+        
+        except Exception as e:
+            print(f"Warning: Could not fit polynomial curve for {metric}: {str(e)}")
+            # Fallback to linear trend
+            z = np.polyfit(x_num, metric_data['value'], 1)
+            p = np.poly1d(z)
+            trend_dates = pd.date_range(metric_data.index[0], metric_data.index[-1], periods=100)
+            trend_x_num = (trend_dates - metric_data.index[0]).days
+            axis.plot(trend_dates, p(trend_x_num), '--', color=color, alpha=0.8,
+                     label=f'{metric} (trend)')
+        
+        # Set axis limits and label
+        axis.set_ylim(y_min, y_max)
+        axis.spines['right'].set_color(color)
+        axis.tick_params(axis='y', colors=color)
         
         # Calculate and print total change
-        total_change = data.iloc[0] - data.iloc[-1]
+        total_change = metric_data['value'].iloc[-1] - metric_data['value'].iloc[0]
         print(f'Total change in {metric}: {total_change:.2f}')
         
-        # Add change annotation
-        y_offset = -0.1 * (data.max() - data.min()) + (5 if metric == 'PBF (%)' else 
-                                                      -14 if metric == 'Weight (lb)' else 0)
-        ax.text(data.index[1] + pd.Timedelta(days=33), 
-                data.iloc[-1] + y_offset,
-                f'$\Delta$ {total_change:+.2f}',
-                ha='right', va='center')
+        # Add change annotation with appropriate unit
+        y_pos = metric_data['value'].iloc[-1]
+        x_pos = metric_data.index[-1] + pd.Timedelta(days=5)
+        if metric == 'PBF / Body Fat (%)':
+            change_text = f'{metric_label}:\n$\Delta$ {total_change:+.2f}%'
+        else:
+            change_text = f'{metric_label}:\n$\Delta$ {total_change:+.2f} lbs'
+        axis.text(x_pos, y_pos, change_text,
+                 color=color, ha='left', va='center', fontsize=8)
         
-        # Add metric label with connector line
-        x_final = data.index[1]
-        y_final = data.iloc[0]
-        ax.plot([x_final + pd.Timedelta(days=35), x_final + pd.Timedelta(days=60)],
-                [y_final, y_final], color='black', linewidth=1)
-        ax.text(x_final + pd.Timedelta(days=65), y_final, metric,
-                fontsize=10, color=color, ha='left', va='center')
+        # Add metric label
+        axis.set_ylabel(metric, color=color)
+
+    # Add vertical line for "Post meet"
+    post_meet_mask = body_comp['Notes'] == 'Post meet'
+    if any(post_meet_mask):
+        post_meet_date = body_comp.index[post_meet_mask][0]
+        ax.axvline(x=post_meet_date, color='black', linestyle='--', alpha=0.8)
+        
+        # Add "Post meet" label
+        ylim = ax.get_ylim()
+        label_x = post_meet_date + pd.Timedelta(days=20)  # move 5 days right
+        label_y = ylim[1] + (ylim[1] - ylim[0]) * 0.02 - 3
+        ax.text(label_x, label_y, 'Post meet', 
+                rotation=0, ha='center', va='bottom', color='black')
 
     # Style the plot
-    ax.set_title('Body Composition Metrics')
-    ax.set_ylabel('Metric Value')
+    ax.set_title('Body Composition Metrics', pad=20)
     ax.set_xlabel('Date')
     
     # Format x-axis
     ax.xaxis_date()
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+    # Label as Month-Year
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
     plt.setp(ax.get_xticklabels(), rotation=45)
+    
+    # Create custom legend for equipment types
+    legend_elements = [
+        plt.Line2D([0], [0], marker='s', color='w', markerfacecolor='gray',
+                  markeredgecolor='black', markersize=8, label='Inbody 270'),
+        plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
+                  markeredgecolor='black', markersize=8, label='Other Equipment')
+    ]
+    
+    # Add equipment legend to the plot
+    ax.legend(handles=legend_elements, loc='upper left', frameon=True)
+    
+    # Remove metric legends
+    for axis in axes[1:]:  # Skip the first axis since it now has our equipment legend
+        axis.legend().set_visible(False)
 
+    # Adjust layout to prevent label overlap
+    fig.tight_layout()
     plt.show()
